@@ -1,0 +1,124 @@
+#!/usr/bin/perl
+#########################################################################################
+#   HPCBench
+#
+#   File: installBench
+#   Description:  Skript to install hpc-bench benchmark packages
+#
+#   Version:  1.0
+#
+#   Author:  Jan Treibig (jt), jan.treibig@gmail.com
+#   Company:  RRZE Erlangen
+#   Copyright:  Copyright (c) 2011, Jan Treibig
+#
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License, v2, as
+#   published by the Free Software Foundation
+#  
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#  
+#   You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+#########################################################################################
+
+use strict;
+use warnings;
+use Cwd 'abs_path';
+use File::Basename;
+
+if (not defined  $ARGV[0]) {
+    die "Usage: installBench <Benchmark Package> <optional: Benchmark source tree>\n";
+}
+
+my $BM_ROOT = abs_path('./');
+my $BenchmarkPackage = $ARGV[0];
+my $BenchmarkSource  = 'none';
+my $BenchmarkName  =  basename($BenchmarkPackage);
+$BenchmarkName  =~ s/\.tar.bz2//;
+my $BenchmarkRoot = "$BM_ROOT/bench/$BenchmarkName/";
+
+if (defined $ARGV[1]) {
+    $BenchmarkSource  = $ARGV[1];
+}
+
+# Unpack Benchmark package
+chdir ("$BM_ROOT/bench") or die "Cannot change in $BM_ROOT/bench : $!\n";
+system("tar xjf $BenchmarkPackage");
+
+if ( $BenchmarkSource ne 'none') {
+# Import benchmark source
+    if (-e "$BenchmarkRoot/install.pl") { 
+        require "$BenchmarkRoot/install.pl";
+    }else {
+        die "ERROR: Required file $BenchmarkRoot/install.pl missing!\n";
+    }
+
+    install($BenchmarkRoot, $BenchmarkSource);
+    chdir ("$BM_ROOT/bench") or die "Cannot change in $BM_ROOT/bench : $!\n";
+} else {
+    if (not scalar <$BenchmarkRoot/*>) {
+        print  "Warning: There are no source files included in this package!\n You may have to specify a benchmark source tree!\n";
+    }
+}
+
+# Patch benchset.mk
+my $BenchTypes = { 'OMP' => 'false',
+                   'MPI' => 'false',
+                   'SEQ' => 'false' };
+
+opendir (DIR, "./$BenchmarkName") or die "Cannot open directory $BenchmarkName : $!\n";
+while (defined(my $file = readdir(DIR))) {
+    if ($file =~ /(OMP|SEQ|MPI)/) {
+        $BenchTypes->{$1} = 'true';
+    }
+}
+
+open INFILE,"< $BM_ROOT/benchset.mk";
+open OUTFILE,"> $BM_ROOT/benchset_tmp.mk";
+
+while (<INFILE>) {
+    my $line = $_;
+
+    if ($line =~ /<EXPORT SEQ>/) {
+        if ($BenchTypes->{'SEQ'} eq 'true') {
+            print OUTFILE $line;
+            print OUTFILE "TARGETS_SEQ :=  \$(TARGETS_SEQ) $BenchmarkName\_SEQ \n";
+        } else {
+            print OUTFILE $line;
+        }
+    } elsif ($line =~ /<EXPORT OMP>/) {
+        if ($BenchTypes->{'OMP'} eq 'true') {
+            print OUTFILE $line;
+            print OUTFILE "TARGETS_OMP :=  \$(TARGETS_OMP) $BenchmarkName\_OMP \n";
+        } else {
+            print OUTFILE $line;
+        }
+    } elsif ($line =~ /<EXPORT MPI>/) {
+        if ($BenchTypes->{'MPI'} eq 'true') {
+            print OUTFILE $line;
+            print OUTFILE "TARGETS_MPI :=  \$(TARGETS_MPI) $BenchmarkName\_MPI \n";
+        } else {
+            print OUTFILE $line;
+        }
+    } elsif ($line =~ /<EXPORT>/) {
+        print OUTFILE $line;
+        foreach my $type (keys %{$BenchTypes}) {
+            if ($BenchTypes->{$type} eq 'true') {
+                print OUTFILE "export $BenchmarkName\_$type\_DIR    = $BenchmarkName\n";
+            }
+        }
+    } else {
+        print OUTFILE $line;
+    }
+}
+    
+close OUTFILE;
+close INFILE;
+
+system("mv -f  $BM_ROOT/benchset_tmp.mk  $BM_ROOT/benchset.mk");
+

@@ -1,0 +1,298 @@
+#!/usr/bin/perl
+#########################################################################################
+#   RRZE HPC Benchmark Suite
+#
+#   File: compareResults.pl
+#   Description:  Skript to generate comparissons of Benchmark runs
+#
+#   Version:  1.0
+#   Author:  jan.treibig@rrze.uni-erlangen.de
+#   Organization:  RRZE Erlangen
+#   http://www.rrze.uni-erlangen.de/dienste/arbeiten-rechnen/hpc/
+#
+#########################################################################################
+use lib 'util';
+use strict;
+use warnings;
+use Cwd 'abs_path';
+use Data::Dumper;
+use XML::Dumper;
+use kiviat;
+use xmgrace;
+
+#=======================================
+# GLOBAL VARIABLES
+#=======================================
+my $BM_ROOT = abs_path('./');
+my $DEBUG = 0;
+my %SYSTEMS;
+
+if (not defined $ARGV[0]){
+    print "Usage:\n";
+    print "compareResults.pl SYSTEM1 SYSTEM2 ...\n";
+    exit 0;
+}
+
+my $RESULT_ROOT = "$BM_ROOT/COMPARE";
+mkdir $RESULT_ROOT if (not -d $RESULT_ROOT);
+mkdir "$RESULT_ROOT/kiviat" if (not -d "$RESULT_ROOT/kiviat");
+mkdir "$RESULT_ROOT/plot" if (not -d "$RESULT_ROOT/plot");
+
+foreach (@ARGV) {
+    my $SYSTEM = $_;
+    my $RESULT_TARGET = "$BM_ROOT/results/$SYSTEM";
+    print "***************************\n";
+    print "SYSTEM $SYSTEM\n";
+    print "LOAD xml result file $RESULT_TARGET/results-$SYSTEM.xml\n";
+    my $dump = new XML::Dumper;
+    my $xmlfile = "$RESULT_TARGET/results-$SYSTEM.xml";
+    my $results = $dump->xml2pl( $xmlfile );
+    $SYSTEMS{"$SYSTEM"} = $results;
+
+#    print Dumper ($results);
+}
+
+my @colors = ( '0000FF', #blue
+               '00FF00', #green
+               'FF0000', #red
+               '00FFFF', #cyan
+               'FF00FF', 
+               'FFFF00'
+); 
+
+print "***************************\n";
+print "INFO: Print Serial Kiviat\n";
+{
+    my $LABELS = '';
+    my $lookup = { };
+    my ($key, $value) = each %SYSTEMS;
+    my $count = 0;
+
+    foreach my $benchmark (keys %{$value->{'SEQ'}}) {
+
+        $LABELS .= "$benchmark,";
+        $lookup->{$benchmark} = $count++;
+    }
+
+    $LABELS =~ s/,$//;
+
+    my $diagram = kiviat->new({
+            VERBOSE => 0,
+            PATH => "$RESULT_ROOT/kiviat",
+            FILE => "SEQ_Jobs",
+            TITLE => 'Serial Performance',
+            LABELS => "$LABELS" 
+        });
+
+    my $i=0;
+
+    foreach my $SYSTEM (keys %SYSTEMS) {
+        my @series;
+        my $RESULTS = $SYSTEMS{$SYSTEM};
+        foreach my $benchmark (keys %{$RESULTS->{'SEQ'}}) {
+
+            $series[$lookup->{"$benchmark"}] = $RESULTS->{'SEQ'}->{"$benchmark"}->{'result'};
+        }
+        $diagram->addSeries("$SYSTEM", $colors[$i++],\@series);
+    }
+
+    print "INFO: Print Kiviat\n";
+    $diagram->printData();
+    print "INFO: generate Kiviat\n";
+    $diagram->generate();
+    print "INFO: done\n";
+}
+
+print "***************************\n";
+print "INFO: Print Socket Kiviat\n";
+{
+    my $LABELS = '';
+    my $lookup = { };
+    my ($key, $value) = each %SYSTEMS;
+    my $count = 0;
+
+    foreach my $benchmark (keys %{$value->{'SOCKET'}}) {
+
+        $LABELS .= "$benchmark,";
+        $lookup->{$benchmark} = $count++;
+    }
+
+    $LABELS =~ s/,$//;
+
+    my $diagram = kiviat->new({
+            VERBOSE => 0,
+            PATH => "$RESULT_ROOT/kiviat",
+            FILE => "SOCKET_Jobs",
+            TITLE => 'Socket Performance',
+            LABELS => "$LABELS" 
+        });
+
+    my $i=0;
+
+    foreach my $SYSTEM (keys %SYSTEMS) {
+        my @series;
+        my $RESULTS = $SYSTEMS{$SYSTEM};
+        my $numProcs;
+        foreach my $benchmark (keys %{$RESULTS->{'SOCKET'}}) {
+
+            $series[$lookup->{"$benchmark"}] = $RESULTS->{'SOCKET'}->{"$benchmark"}->{'result'} if exists $lookup->{"$benchmark"};
+            $numProcs = $RESULTS->{SOCKET}->{$benchmark}->{numprocs};
+        }
+        $numProcs =~ s/^[0]+//;
+        $diagram->addSeries("$SYSTEM $numProcs", $colors[$i++],\@series);
+    }
+
+    $diagram->printData();
+    $diagram->generate();
+}
+
+print "***************************\n";
+print "INFO: Print Node Kiviat\n";
+{
+    my $LABELS = '';
+    my $lookup = { };
+    my ($key, $value) = each %SYSTEMS;
+    my $count = 0;
+
+    foreach my $benchmark (keys %{$value->{'NODE'}}) {
+
+        $LABELS .= "$benchmark,";
+        $lookup->{$benchmark} = $count++;
+    }
+
+    $LABELS =~ s/,$//;
+
+
+    my $diagram = kiviat->new({
+            VERBOSE => 0,
+            PATH => "$RESULT_ROOT/kiviat",
+            FILE => "NODE_Jobs",
+            TITLE => 'Node Performance',
+            LABELS => "$LABELS" 
+        });
+
+    my $i=0;
+
+    foreach my $SYSTEM (keys %SYSTEMS) {
+        my @series;
+        my $RESULTS = $SYSTEMS{$SYSTEM};
+        my $numProcs;
+        foreach my $benchmark (keys %{$RESULTS->{'NODE'}}) {
+
+            $series[$lookup->{"$benchmark"}] = $RESULTS->{'NODE'}->{"$benchmark"}->{'result'} if exists $lookup->{"$benchmark"};
+            $numProcs = $RESULTS->{NODE}->{$benchmark}->{numprocs};
+        }
+        $numProcs =~ s/^[0]+//;
+        $diagram->addSeries("$SYSTEM $numProcs", $colors[$i++],\@series);
+    }
+
+    $diagram->printData();
+    $diagram->generate();
+
+}
+
+# convert all kiviats to png
+#opendir DIR,"$RESULT_ROOT/kiviat";
+#mkdir "$RESULT_ROOT/kiviat/png" if (not -d "$RESULT_ROOT/kiviat/png");
+#
+#while (defined(my $file = readdir(DIR))) {
+#    if ($file !~ /^\./) {
+#        if ($file =~ /(.*)\.pdf/) {
+#            system ("convert $RESULT_ROOT/kiviat/$1.pdf $RESULT_ROOT/kiviat/png/$1.png");
+#        }
+#    }
+#}
+
+my $PLOT_CONFIG = {};
+# Create parallel graphs
+my ($key, $value) = each %SYSTEMS;
+foreach my $benchmark (keys %{$value->{'PARALLEL'}}) {
+
+    open PPFILE,"<$BM_ROOT/bench/$benchmark/postprocess.txt" or die "Cannot open postprocess.txt: $!\n";
+    my $yaxis = <PPFILE>;
+    chomp $yaxis;
+    print "###$yaxis###\n";
+    $PLOT_CONFIG->{$benchmark} = { YAXIS => "$yaxis"};
+    close PPFILE;
+}
+
+
+
+# generate GRACE graphs for parallel results
+print "***************************\n";
+print "INFO Print Parallel Graphs\n";
+mkdir "$RESULT_ROOT/plot/agr" if (not -d "$RESULT_ROOT/plot/agr");
+mkdir "$RESULT_ROOT/plot/eps" if (not -d "$RESULT_ROOT/plot/eps");
+mkdir "$RESULT_ROOT/plot/png" if (not -d "$RESULT_ROOT/plot/png");
+
+
+my $GRACE_DATA = {};
+my $symbol ={};
+my $color = {};
+
+foreach my $SYSTEM (keys %SYSTEMS) {
+    my $RESULTS = $SYSTEMS{$SYSTEM};
+
+    my $RESULT_TARGET = "$BM_ROOT/resultPool/$SYSTEM";
+
+    foreach my $benchmark (keys %{$RESULTS->{PARALLEL}}) {
+
+        $symbol->{$benchmark} = 1 if not exists $symbol->{$benchmark} ;
+        $color->{$benchmark} = 1 if not exists $color->{$benchmark} ;
+
+        $GRACE_DATA->{$benchmark} = { title    => "$benchmark",
+            subtitle => $RESULTS->{'PARALLEL'}->{"$benchmark"}->{par_type},
+            series => []}
+        if not exists $GRACE_DATA->{$benchmark};
+
+        push @{$GRACE_DATA->{$benchmark}->{series}}, 
+        { "title"     =>  "$SYSTEM",
+            "data file" =>  "$RESULT_TARGET/plot/data/$benchmark.dat",
+            "line" => {
+                "type"      => "1",
+                "color"     => "$color->{$benchmark}",
+                "linewidth" => "2",
+                "linestyle" => "1",
+                "pattern"   => "1",
+            },
+            "symbol" => {
+                "type"      => "$symbol->{$benchmark}",
+                "color"     => "$color->{$benchmark}",
+                "pattern"   => "1",
+                "linewidth" => "2",
+                "linestyle" => "1",
+                "size"      => "1",
+                "fill pattern" => "1",
+                "fill color"=> "$color->{$benchmark}",
+            }
+        };
+
+        $color->{$benchmark}++;
+        $symbol->{$benchmark}++;
+    }
+}
+
+foreach my $plot (keys %{$GRACE_DATA}) {
+    foreach my $outformat (('eps','png')) {
+        xmgrace ({"title"         => "$GRACE_DATA->{$plot}->{title}",
+                "subtitle"        => "$GRACE_DATA->{$plot}->{subtitle}",
+                "legend"          => "0.7,0.25",
+                "device"          => uc $outformat,
+                "output file"    => "$RESULT_ROOT/plot/$outformat/$GRACE_DATA->{$plot}->{title}.$outformat",
+                "grace output file" => "$RESULT_ROOT/plot/agr/$GRACE_DATA->{$plot}->{title}.agr",
+                "xaxis label"     => "number of processors",
+                "yaxis label"     => "$PLOT_CONFIG->{$GRACE_DATA->{$plot}->{title}}->{YAXIS}"
+            },
+            $GRACE_DATA->{$plot}->{series});
+    }
+}
+
+# convert eps to pdf
+mkdir "$RESULT_ROOT/plot/pdf" if (not -d "$RESULT_ROOT/plot/pdf");
+
+foreach my $plot (keys %{$GRACE_DATA}) {
+    system("epstopdf --outfile=$RESULT_ROOT/plot/pdf/$GRACE_DATA->{$plot}->{title}.pdf $RESULT_ROOT/plot/eps/$GRACE_DATA->{$plot}->{title}.eps");
+}
+
+
+

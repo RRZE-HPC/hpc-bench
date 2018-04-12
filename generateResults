@@ -1,0 +1,339 @@
+#!/usr/bin/perl
+#########################################################################################
+#   HPCBench
+#
+#   File: generateResults
+#   Description:  Skript for result collection and generation
+#
+#   Version:  1.0
+#
+#   Author:  Jan Treibig (jt), jan.treibig@gmail.com
+#   Company:  RRZE Erlangen
+#   Copyright:  Copyright (c) 2011, Jan Treibig
+#
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License, v2, as
+#   published by the Free Software Foundation
+#  
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#  
+#   You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+#########################################################################################
+
+use lib 'util';
+use strict;
+use warnings;
+use File::Copy;
+use Cwd 'abs_path';
+use Data::Dumper;
+use XML::Dumper;
+use xmgrace;
+
+#=======================================
+# GLOBAL VARIABLES
+#=======================================
+my $BM_ROOT = abs_path('./');
+my $DEBUG = 0;
+
+my $hasGracebat = 0;
+my $hasEpstopdf = 0;
+
+#check available programs
+if (system('gracebat >/dev/null 2>&1') ) {
+    print "WARNING gracebat not found - cannot generate AGR files\n";
+    $hasGracebat = 0;
+} else {
+    $hasGracebat = 1;
+}
+
+if (system('which epstopdf >/dev/null 2>&1') ) {
+    print "WARNING epstopdf not found - cannot generate pdf files\n";
+    $hasEpstopdf = 0;
+} else {
+    $hasEpstopdf = 1;
+}
+
+if (not defined $ARGV[0]){
+    print "Usage:\n";
+    print "generateResults SYSTEM\n";
+    exit 0;
+}
+
+mkdir 'results' if (not -d 'results');
+
+my $SYSTEM = $ARGV[0];
+my $RESULT_ROOT = "$BM_ROOT/bench_$SYSTEM";
+my $RESULT_TARGET = "$BM_ROOT/results/$SYSTEM";
+my $RESULTS = {
+    SEQ      => {},
+    NODE     => {},
+    PARALLEL => {},
+    SOCKET   => {}
+};
+
+my $REGEX_DATE = '\d{4}_\d{2}_\d{2}_\d{4}';
+my $PLOT_CONFIG = {};
+
+#=======================================
+# MAIN
+#=======================================
+mkdir ($RESULT_TARGET);
+copy ("$RESULT_ROOT/build_env.txt","$RESULT_TARGET/build_env.txt");
+
+# collect Results
+chdir ("$RESULT_ROOT/results") or die "Cannot change in $RESULT_ROOT/results: $!\n";
+opendir (DIR, './') or die "Cannot open current directory: $!\n";
+
+while (defined(my $file = readdir(DIR))) {
+    if ($file !~ /^\./) {
+        print "SCANNING $file\n" if ($DEBUG);
+
+        if (-d $file) {
+            print "ENTER $file\n" if ($DEBUG);
+            chdir ("$file") or die "Cannot change in $file: $!\n";
+            opendir (RESULTDIR, './') or die "Cannot open current directory: $!\n";
+
+            while (defined(my $resultfile = readdir(RESULTDIR))) {
+                print "TRY $resultfile\n" if ($DEBUG);
+
+                if ( $resultfile =~ /([A-Z0-9]+?)_(SEQ-NO|OMP-[A-Z]+?|MPI-[A-Z]+?)-($REGEX_DATE)\.np(\d+)\.res/ or
+                    $resultfile =~ /([A-Z0-9]+?)_(SEQ-NO|OMP-[A-Z]+?|MPI-[A-Z]+?)-($REGEX_DATE)\.(\d+?)\.np(\d+)\.res/
+                ) {
+
+                    my $benchmark = $1;
+                    my $date = $3;
+
+                    my $numproc;
+                    my $testcase;
+                    my $case;
+
+# Possible cases:
+# 1  - Sequential run  SEQ
+# 2  - Node run        NODE
+# 3  - Socket run      SOCKET
+# 4  - Parallel run    PARALLEL
+
+                    print "FOUND results $benchmark\n" if ($DEBUG);
+
+# read the result
+                    open RESFILE,"< $resultfile";
+                    my $result = <RESFILE>;
+                    chomp $result;
+                    close RESFILE;
+
+# Intialize data structures and determine case
+
+                    if (defined $5) {
+                        $testcase = $4;
+                        $numproc = $5;
+                        $case = 'subtest';
+                    } else {
+                        $numproc = $4;
+                        $case = 'test';
+                    }
+
+#determine the type and subtype
+                    my $tmp = $2;
+                    my $type;
+                    my $subtype;
+
+                    if ($tmp =~ /(OMP|MPI)-(SOCKET|NODE|PARALLEL)/) {
+                        $type = $2;
+                        $subtype = $1;
+                    } elsif ($tmp =~ /(SEQ)-NO/) {
+                        $type = $1;
+                        $subtype = 'SEQ';
+                    } else {
+                        print "ERROR: Did not match test type! \n";
+                    }
+
+                    if (not exists $RESULTS->{$type}->{$benchmark}) {
+                        $RESULTS->{$type}->{$benchmark} = {date => $date, par_type => $subtype};
+                    }
+
+
+                    if ($type eq 'PARALLEL') {
+                        if (not exists $RESULTS->{$type}->{$benchmark}->{'par_results'}) {
+                            $RESULTS->{$type}->{$benchmark}->{'par_results'} = {};
+                        }
+                        if (not exists $RESULTS->{$type}->{$benchmark}->{'par_results'}->{$numproc}) {
+                            $RESULTS->{$type}->{$benchmark}->{'par_results'}->{$numproc} = {};
+                        }
+                        if ($case eq 'subtest') {
+                            if (not exists $RESULTS->{$type}->{$benchmark}->{'par_results'}->{$numproc}->{'var_results'}) {
+                                $RESULTS->{$type}->{$benchmark}->{'par_results'}->{$numproc}->{'var_results'} = {};
+                            }
+                            $RESULTS->{$type}->{$benchmark}->{'par_results'}->{$numproc}->{'var_results'}->{$testcase} = $result ;
+                        } else {
+                            $RESULTS->{$type}->{$benchmark}->{'par_results'}->{$numproc}->{'result'} = $result;
+                        }
+                    } else {
+                        if ($case eq 'subtest') {
+                            if (not exists $RESULTS->{$type}->{$benchmark}->{'var_results'}) {
+                                $RESULTS->{$type}->{$benchmark}->{'var_results'} = {};
+                            }
+                            if (not exists $RESULTS->{$type}->{$benchmark}->{'numprocs'}) {
+                                $RESULTS->{$type}->{$benchmark}->{'numprocs'} = $numproc;
+                            }
+                            $RESULTS->{$type}->{$benchmark}->{'var_results'}->{$testcase} = $result;
+                        } else {
+                            $RESULTS->{$type}->{$benchmark}->{'result'} = $result;
+                            $RESULTS->{$type}->{$benchmark}->{'numprocs'} = $numproc;
+                        }
+                    }
+
+                    print "DEBUG - $resultfile CASE $case\n" if ($DEBUG);
+                } else {
+#print "INFO - Cannot match $resultfile \n";
+                }
+            }
+
+            closedir RESULTDIR;
+            chdir '../';
+        }
+    }
+}
+
+closedir DIR;
+chdir ($RESULT_TARGET);
+
+#print Dumper ($RESULTS);
+
+# generate CSV file
+#open FILE,">$RESULT_TARGET/results-$SYSTEM.csv";
+
+#print FILE "SYSTEM,$SYSTEM\n";
+
+#Sequential results
+#print "STORE csv output to file $RESULT_TARGET/results-$SYSTEM.csv\n";
+#print FILE "SEQ\n";
+#print FILE "BENCHMARK,DATE,RESULT\n";
+#foreach my $benchmark (keys %{$RESULTS->{'SEQ'}}) {
+#    print FILE "$benchmark,$RESULTS->{SEQ}->{$benchmark}->{date},$RESULTS->{SEQ}->{$benchmark}->{result}\n";
+#}
+
+#Parallel results
+#foreach my $par (@{[ qw(OMP MPI) ]}) {
+#    print FILE "\n\n";
+#    print FILE "$par\n";
+#    print FILE "BENCHMARK,DATE\n";
+#    foreach my $benchmark (keys %{$RESULTS->{$par}}) {
+#        my $ptr = $RESULTS->{$par}->{$benchmark};
+#        print FILE "$benchmark,$ptr->{date}\n";
+#        foreach (sort keys %{$ptr->{par_results}}){ print FILE "$_,";}
+#        print FILE "\n";
+#        foreach (sort keys %{$ptr->{par_results}}){ print FILE "$ptr->{par_results}->{$_}->{result},";}
+#        print FILE "\n";
+#
+#        #get y axis for parallel graphs
+#        open PPFILE,"<$BM_ROOT/bench/$benchmark/postprocess.txt" or die "Cannot open postprocess.txt: $!\n";
+#        my $yaxis = <PPFILE>;
+#        chomp $yaxis;
+#        print "###$yaxis###\n";
+#        $PLOT_CONFIG->{$benchmark} = { YAXIS => "$yaxis"};
+#        close PPFILE;
+#    }
+#}
+#
+#close FILE;
+
+# write XML dump
+print "STORE xml output to file $RESULT_TARGET/results-$SYSTEM.xml\n";
+my $dump = new XML::Dumper;
+my $xmlfile = "$RESULT_TARGET/results-$SYSTEM.xml";
+$dump->pl2xml( $RESULTS, $xmlfile );
+
+# Archive raw result directory
+print "STORE archive of raw results\n";
+system ("tar czf $RESULT_TARGET/raw-results.tgz  $RESULT_ROOT  >/dev/null 2>&1");
+
+# Creating raw data files for grace
+print "STORE raw grace data\n";
+mkdir "$RESULT_TARGET/plot" if (not -d "$RESULT_TARGET/plot");
+mkdir "$RESULT_TARGET/plot/data" if (not -d "$RESULT_TARGET/plot/data");
+
+my $GRACE_DATA = [];
+
+
+foreach my $benchmark (keys %{$RESULTS->{'PARALLEL'}}) {
+
+    open PPFILE,"<$BM_ROOT/bench/$benchmark/postprocess.txt" or die "Cannot open postprocess.txt: $!\n";
+    my $yaxis = <PPFILE>;
+    chomp $yaxis;
+    $PLOT_CONFIG->{$benchmark} = { YAXIS => "$yaxis"};
+    close PPFILE;
+
+    my $ptr = $RESULTS->{'PARALLEL'}->{$benchmark};
+    push @{$GRACE_DATA},{ title    => "$benchmark",
+        subtitle => $ptr->{'par_type'}};
+
+    open FILE,">$RESULT_TARGET/plot/data/$benchmark.dat";
+    foreach my $num_proc (sort keys %{$ptr->{par_results}}){
+        if (not ($ptr->{par_results}->{$num_proc}->{result} eq 'ERROR')){
+            print FILE "$num_proc  $ptr->{par_results}->{$num_proc}->{result}\n";
+        }
+    }
+    close FILE;
+}
+
+if ($hasGracebat) {
+
+# generate GRACE graphs for parallel results
+    print "STORE eps and agr files\n";
+    mkdir "$RESULT_TARGET/plot/agr" if (not -d "$RESULT_TARGET/plot/agr");
+    mkdir "$RESULT_TARGET/plot/eps" if (not -d "$RESULT_TARGET/plot/eps");
+    mkdir "$RESULT_TARGET/plot/png" if (not -d "$RESULT_TARGET/plot/png");
+
+    foreach my $plot (@{$GRACE_DATA}) {
+        foreach my $outformat (('eps','png')) {
+            xmgrace ({"title"         => "$plot->{title}",
+                    "subtitle"        => "$plot->{subtitle}",
+                    "legend"          => "0.7,0.25",
+                    "device"          => uc $outformat,
+                    "output file"    => "$RESULT_TARGET/plot/$outformat/$plot->{title}.$outformat",
+                    "grace output file" => "$RESULT_TARGET/plot/agr/$plot->{title}.agr",
+                    "xaxis label"     => "number of processors",
+                    "yaxis label"     => "$PLOT_CONFIG->{$plot->{title}}->{YAXIS}"
+                },
+                [ { "title"     =>  "$SYSTEM",
+                    "data file" =>  "$RESULT_TARGET/plot/data/$plot->{title}.dat",
+                    "line" => {
+                        "type"      => "1",
+                        "color"     => "4",
+                        "linewidth" => "2",
+                        "linestyle" => "1",
+                        "pattern"   => "1",
+                    },
+                    "symbol" => {
+                        "type"      => "2",
+                        "color"     => "1",
+                        "pattern"   => "1",
+                        "linewidth" => "2",
+                        "linestyle" => "1",
+                        "size"      => "1",
+                        "fill pattern" => "1",
+                        "fill color"=> "1",
+                    }
+                }]);
+        }
+    }
+} else{
+    print "WARN gracebat not found!\n";
+}
+
+# convert eps to pdf
+
+if ($hasEpstopdf) {
+    print "STORE pdf files\n";
+    mkdir "$RESULT_TARGET/plot/pdf" if (not -d "$RESULT_TARGET/plot/pdf");
+    foreach my $plot (@{$GRACE_DATA}) {
+        system("epstopdf --outfile=$RESULT_TARGET/plot/pdf/$plot->{title}.pdf $RESULT_TARGET/plot/eps/$plot->{title}.eps");
+    }
+}
+

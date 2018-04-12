@@ -1,0 +1,470 @@
+#!/usr/bin/perl
+#########################################################################################
+#   HPCBench
+#
+#   File: runBench
+#   Description:  Run skript for benchmark execution
+#
+#   Version:  1.0
+#
+#   Author:  Jan Treibig (jt), jan.treibig@gmail.com
+#   Company:  RRZE Erlangen
+#   Copyright:  Copyright (c) 2011, Jan Treibig
+#
+#   This program is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License, v2, as
+#   published by the Free Software Foundation
+#  
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#  
+#   You should have received a copy of the GNU General Public License
+#   along with this program; if not, write to the Free Software
+#   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
+#########################################################################################
+use lib 'util';
+use strict;
+use warnings;
+use Time::localtime;
+use Getopt::Std;
+use File::ReadBackwards;
+use File::Copy;
+use Cwd 'abs_path';
+
+#=======================================
+# GLOBAL VARIABLES
+#=======================================
+#<#
+my $BM_ROOT = abs_path('./');        #Root directory of benchmark suite
+my $RESULT_ROOT_PREFIX = 'bench';    #Result directory
+my $RESULT_ROOT;
+my $RESULT_BASE;
+my $LOG_BASE;
+my $PARALLEL='NO';
+my $TYPE='NO';
+my $SYSTEM='NONE';
+my $BENCHNAME;
+my $BENCHMARK;
+my @BENCHMARKS;
+my $INTERACTIVE=0;
+my %OPT;
+my $ENDIAN;
+my $TIMESTAMP;
+my $SEPARATOR="**********************************************";
+my $OPT_STRING;
+
+my $BENCH_ENV = {DEBUG=>0,
+                 REGEXP=>'none',
+                 EXE=>'none',
+                 BENCHMARK=>'none',
+                 BENCH_ROOT=>"$BM_ROOT/bench",
+                 RESFILE=>'none',
+                 RUN_BASE=>'none',
+                 RESBASE=>'none',
+                 TIME=>'none',
+                 PROCLIST=>[],
+                 VERBOSE=>0};
+
+my $RUN_BENCH_FUNC_PTR;
+
+#>#
+
+#=======================================
+# UTILITY SUBROUTINES
+#=======================================
+#<#
+
+sub init #<#
+{
+    print "\n";
+    $OPT_STRING = 'hiaP:M:N:S:dv';
+    getopts( "$OPT_STRING", \%OPT ) or usage();
+    usage() if $OPT{h};
+
+# determine available benchmarks
+    opendir (DIR, $BENCH_ENV->{'BENCH_ROOT'}) or die "Cannot open directory $BENCH_ENV->{BENCH_ROOT} : $!\n";
+    @BENCHMARKS = readdir(DIR);
+
+    if ($OPT{a}) {
+        print "Available Benchmarks: @BENCHMARKS\n";
+        exit;
+    }
+    if (! $ARGV[0] ){
+        die "ERROR: Please specify a benchmark!!\nFor help call script with flag -h.\n\n";
+    }
+
+    $BENCH_ENV->{'BENCHMARK'} = $ARGV[0];
+    $BENCHMARK = $BENCH_ENV->{'BENCHMARK'};
+    $BENCHNAME = $BENCHMARK;
+    $BENCHNAME =~ s/_MPI|_OMP|_SEQ//;
+
+# Is the benchmark parallel?
+    if ($BENCHMARK =~ /[A-Z]_(OMP|MPI)/) {
+        $PARALLEL = $1;
+
+        if (not ($OPT{P} or $OPT{N} or $OPT{S} or ($BENCHNAME eq 'PALLAS'))) {
+            print "WARNING: No processor list specified for parallel job!\nSetting default value 1,2,4\n\n";
+            @{$BENCH_ENV->{'PROCLIST'}} = qw(1 2 4);
+        }
+    }
+
+# Process command line options
+    if ($OPT{v}) { $BENCH_ENV->{'VERBOSE'} = 1;}
+    if ($OPT{i}) { $INTERACTIVE = 1;}
+    if ($OPT{M}) { 
+        $SYSTEM = $OPT{M};
+        if (-e "system/$SYSTEM.pm") { 
+            require "system/$SYSTEM.pm";
+        }else {
+            die "ERROR: Required file system/$SYSTEM.pm missing!\n";
+        }
+    }
+    if ($OPT{P}) { 
+        if ($PARALLEL ne 'NO') {
+            $TYPE = 'PARALLEL';
+            @{$BENCH_ENV->{'PROCLIST'}} = split /,/,$OPT{P};
+        } else {
+            print "WARNING: Ignoring flag -P for sequential benchmark $BENCHMARK !\n";
+        }
+    }
+    if ($OPT{S}) { 
+        if ($PARALLEL ne 'NO') {
+            $TYPE = 'SOCKET';
+            @{$BENCH_ENV->{'PROCLIST'}} = split /,/,$OPT{S};
+        } else {
+            print "WARNING: Ignoring flag -S for sequential benchmark $BENCHMARK !\n";
+        }
+    }
+    if ($OPT{N}) { 
+        if ($PARALLEL ne 'NO') {
+            $TYPE = 'NODE';
+            @{$BENCH_ENV->{'PROCLIST'}} = split /,/,$OPT{N};
+        } else {
+            print "WARNING: Ignoring flag -N for sequential benchmark $BENCHMARK !\n";
+        }
+    }
+    if ($OPT{d}) { $BENCH_ENV->{'DEBUG'} = 1;}
+    if ($BENCHNAME eq 'PALLAS') {
+        @$BENCH_ENV->{'PROCLIST'} = qw(2);
+        $TYPE = 'PALLAS';
+    }
+    if ($SYSTEM eq 'NONE') {
+        die "ERROR Please specify a system!!\n\nFor help call script with flag -h.\n\n";
+    }
+
+# Check if Benchmark is supported
+    my $found = 0;
+    foreach my $bench (@BENCHMARKS) {
+        if ($BENCHNAME eq $bench) {
+            $found = 1;
+            last;
+        }
+    }
+    if (! $found ){
+        die "ERROR: $BENCH_ENV->{$BENCHMARK} invalid.\n Please specify a valid benchmark!!\nCan be one of @BENCHMARKS.\n\n";
+    }
+
+    if (-e "$BENCH_ENV->{BENCH_ROOT}/$BENCHNAME/$BENCHMARK.pl") { 
+        require "$BENCH_ENV->{BENCH_ROOT}/$BENCHNAME/$BENCHMARK.pl";
+    }else {
+        die "ERROR: Required file $BENCH_ENV->{BENCH_ROOT}/$BENCHNAME/$BENCHMARK.pl missing!\n";
+    }
+
+#Initialize global variables
+    my $tm = localtime;
+    eval "\$RUN_BENCH_FUNC_PTR = \\&run_$BENCHMARK";
+    $BENCH_ENV->{'BENCH_ROOT'} .= "/$BENCHNAME";
+    $RESULT_BASE = "$BM_ROOT/$RESULT_ROOT_PREFIX"."_$SYSTEM";
+    $RESULT_ROOT = "$RESULT_BASE/results/$BENCHNAME";
+#    $EXE = "$RESULT_BASE/bin/$BENCHMARK-$SYSTEM";
+    $BENCH_ENV->{'EXE'} = "$RESULT_BASE/bin/$BENCHMARK-$SYSTEM";
+
+    $BENCH_ENV->{'TIME'} = "$RESULT_BASE/bin/wll";
+    $ENDIAN = "$RESULT_BASE/bin/endian";
+    $TIMESTAMP = sprintf '%04d_%02d_%02d_%02d%02d',$tm->year+1900,$tm->mon+1,$tm->mday,$tm->hour,$tm->min,;
+    $LOG_BASE = "$RESULT_BASE/log/$BENCHMARK-$TIMESTAMP";
+    $BENCH_ENV->{'RESBASE'} = "$RESULT_ROOT/$BENCHMARK-$TYPE-$TIMESTAMP";
+    $BENCH_ENV->{'RUN_BASE'} = "$BM_ROOT/RUN_$SYSTEM-$BENCHMARK-$TYPE-$TIMESTAMP";
+
+# Create directories if necessary
+    mkdir "$RESULT_BASE/results" if (not -d "$RESULT_BASE/results");
+    mkdir "$RESULT_BASE/log" if (not -d "$RESULT_BASE/log");
+    mkdir "$BENCH_ENV->{RUN_BASE}" if (not -d "$BENCH_ENV->{RUN_BASE}");
+    mkdir $RESULT_ROOT if (not -d $RESULT_ROOT);
+    mkdir "$LOG_BASE" if (not -d "$LOG_BASE");
+    copy ("$BM_ROOT/system/$SYSTEM.pm","$LOG_BASE/$SYSTEM.pm");
+    chdir($BENCH_ENV->{'RUN_BASE'});
+}
+#>#
+sub clean_all #<#
+{
+    #   system ("rm -rf RUN_*  >/dev/null 2>&1"); 
+
+}
+#>#
+sub usage  #<# 
+{
+    print <<END;
+usage: $0 [-$OPT_STRING] -M <SYSTEM> <BENCHMARK>
+
+Required:
+-M <SYSTEM> : Specify test Machine
+
+Optional:
+-h        : this (help) message
+-v        : verbose output
+-P <LIST> : parallel: List with number of processors
+-S <LIST> : socket: List with number of processors
+-N <LIST> : node: List with number of processors
+-d        : dry run for debugging
+-i        : interactive (print on STDOUT)
+-a        : list available benchmarks
+
+Example: 
+$0 -M WOODY DMRG_SEQ
+
+Example for parallel case:
+$0 -M WOODY -P 1,2,4,8,16 TRATS_MPI
+
+Example for dry run (recommended before real run):
+$0 -M WOODY -i -v -d  DMRG_SEQ
+END
+
+exit(0);
+}
+#>#
+sub printSettings #<#
+{
+    if (not $INTERACTIVE) {
+        print "Non Interactive run: STDOUT is printed to $LOG_BASE/out.txt\n";
+        open STDOUT, ">$LOG_BASE/out.txt";
+    }
+
+    print <<END;
+*************************
+       HPC BENCH
+*************************
+
+SYSTEM    $SYSTEM
+BENCHMARK $BENCHNAME
+END
+    print "PARALLEL  $PARALLEL\nNUM PROC @{$BENCH_ENV->{'PROCLIST'}} \n" if ($PARALLEL ne 'NO');
+    print "\n";
+}
+#>#
+sub verifyBinaries  #<#
+{
+    if (not (($BENCHMARK eq 'KETTE_SEQ') or 
+            ($BENCHMARK eq 'SIP_SEQ') or 
+            ($BENCHMARK eq 'AMBER_MPI') or 
+            ($BENCHMARK eq 'FASTEST_MPI') or 
+            ($BENCHMARK eq 'SIP_OMP'))) {
+        if (! -s $BENCH_ENV->{'EXE'}) {
+            die "ERROR Binary $BENCH_ENV->{'EXE'} not existing!\n\n";
+        }
+        if (! -s $BENCH_ENV->{'TIME'}) {
+            die "ERROR Binary $BENCH_ENV->{'TIME'} not existing!\n\n";
+        }
+        if (! -s $ENDIAN) {
+            die "ERROR Binary $ENDIAN not existing!\n\n";
+        }
+
+        open FILE,">$LOG_BASE/ldd.txt";
+        if (not system("ldd $BENCH_ENV->{'EXE'} >/dev/null 2>&1") ) {
+            my $ldd_string = `ldd $BENCH_ENV->{'EXE'}`;
+            print FILE "$BENCH_ENV->{'EXE'}\n";
+            print FILE $ldd_string;
+        } else {
+            print FILE  "Command ldd not available.\n";
+        }
+        close FILE;
+    }
+}
+#>#
+sub printMachineInfo  #<#
+{
+    my $filename = "$LOG_BASE/machine.txt";
+    my $date = `date`;chomp $date;
+    my $hostname = `hostname`;chomp $hostname;
+    my $uname = `uname -a`;chomp $uname;
+    my (@issue, @cpuinfo1, @meminfo, $numactl, $cpuinfo2, $fpversion, $pbsnodefile);
+    if (-r '/etc/issue'){
+        open FILE,'</etc/issue';@issue = <FILE>;close FILE;
+    } else {
+        $issue[0] = '/etc/issue not available.';
+    }
+    if (-r '/proc/cpuinfo'){
+        open FILE,'</proc/cpuinfo';@cpuinfo1 = <FILE>;close FILE;
+    } else {
+        $cpuinfo1[0] = '/proc/cpuinfo  not available.';
+    }
+    if (-r '/proc/meminfo'){
+        open FILE,'</proc/meminfo';@meminfo = <FILE>;close FILE;
+    } else {
+        $meminfo[0] = '/proc/meminfo  not available.';
+    }
+    if (not system('numactl --hardware >/dev/null 2>&1') ) {
+        $numactl = `numactl --hardware`;
+    } else {
+        $numactl = 'Not available';
+    }
+    if (not system('cpuinfo >/dev/null 2>&1') ) {
+        $cpuinfo2 = `cpuinfo`;
+    } elsif (-x  '/apps/rrze/bin/cpuinfo' ) {
+        $cpuinfo2 = `/apps/rrze/bin/cpuinfo`;
+    } else {
+        $cpuinfo2 = 'Not available';
+    }
+    if (not system('fpversion >/dev/null 2>&1') ) {
+        $fpversion = `fpversion`;
+    } else {
+        $fpversion = 'Not available';
+    }
+    $pbsnodefile = $ENV{'PBS_NODEFILE'};
+    my $pbsinfo;
+    if (not defined $pbsnodefile) { 
+        $pbsinfo = 'Not set';
+    } else {
+        open PBSFILE,"<$pbsnodefile";
+        while (<PBSFILE>) {
+            $pbsinfo .= $_;
+        }
+        close PBSFILE;
+    }
+
+    open FILE,"> $filename";
+    print FILE <<END;
+    $SEPARATOR
+Machine Info
+$SEPARATOR
+Date: $date
+Host: $hostname
+System Type/ Kernel: $uname
+\n
+$SEPARATOR
+/etc/issue (OS version) \n
+@issue
+\n
+$SEPARATOR
+/proc/cpuinfo \n
+@cpuinfo1
+\n
+$SEPARATOR
+/proc/meminfo \n
+@meminfo
+\n
+$SEPARATOR
+numactl --hardware \n
+$numactl
+\n
+$SEPARATOR
+cpuinfo  \n
+$cpuinfo2
+\n
+$SEPARATOR
+fpversion  \n
+$fpversion
+\n
+$SEPARATOR
+PBS_NODEFILE \n
+$pbsinfo
+\n
+$SEPARATOR
+END
+
+close FILE;
+}
+#>#
+sub printEnvironment  #<#
+{
+    open FILE,">$LOG_BASE/env.txt";
+    foreach my $key (sort keys(%ENV)) {
+        print FILE "$key = $ENV{$key}\n";
+    } 
+    close FILE;
+}
+#>#
+sub setResult  #<#
+{
+    my $time = shift;
+    my $result;
+    my $matched='false';
+
+    if (-e $BENCH_ENV->{'RESFILE'}) {
+        open ( FILE,"<$BENCH_ENV->{RESFILE}") or print "ERROR: Could not open $BENCH_ENV->{RESFILE} : $!.\n";
+        while (<FILE>) {
+            my $line = $_;
+            if ($line =~ /$BENCH_ENV->{'REGEXP'}/) {
+                $matched = 'true';
+                if($time) {
+                    $result = (1.0/$1);
+                } else {
+                    $result = $1;
+                }
+
+                print "RESULT: $result \n" if $BENCH_ENV->{'VERBOSE'};
+            }
+        }
+        close FILE;
+    }
+
+    if ($matched eq 'false' ) {
+        print "ERROR: Benchmark result not found!\n";
+        $result = 'ERROR';
+    }
+
+    my $resultfile = $BENCH_ENV->{'RESFILE'};
+    $resultfile =~ s/\.raw/.res/;
+    open FILE, ">$resultfile";
+    print FILE "$result\n";
+    close FILE;
+}
+#>#
+sub mpi_run_common #<#
+{
+    my $num_proc = shift;
+    my $command = shift;
+    my $tstart;
+    my $tfinish;
+
+    mpi_init();
+    $tstart = `$BENCH_ENV->{'TIME'}`;
+    mpi_run("$num_proc","$command","$TYPE");
+    $tfinish = `$BENCH_ENV->{'TIME'}`;
+    mpi_done();
+    my $result = $tfinish - $tstart;
+
+    sleep (10);
+    open FILE,">> $BENCH_ENV->{RESFILE}";
+    print FILE "#TStart $tstart";
+    print FILE "#TFinish $tfinish";
+    print FILE "#WangWanling5 $result\n";
+    close FILE;
+}
+#>#
+
+#>#
+
+#=======================================
+# MAIN
+#=======================================
+
+clean_all();
+init();
+printSettings();
+verifyBinaries();
+printMachineInfo();
+printEnvironment();
+
+my $BENCH_CALLBACKS = {mpi_run_common => \&mpi_run_common,
+                       omp_pin        => \&omp_pin,
+                       setResult      => \&setResult};
+
+print "STARTING $BENCHMARK at $TIMESTAMP\n";
+&$RUN_BENCH_FUNC_PTR($BENCH_ENV, $BENCH_CALLBACKS);
+print "\nhpc-bench run finished!\n";
+
+# vim: foldmethod=marker foldmarker=#<#,#># 
